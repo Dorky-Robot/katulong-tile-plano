@@ -1,0 +1,23 @@
+{
+  "name": "Plano",
+  "type": "plano",
+  "description": "Context sheets — notes, todos, and project plans. Works standalone or with Tala for git-backed versioning.",
+  "icon": "note-pencil",
+  "version": "0.1.0",
+  "author": "dorky-robot",
+  "repo": "Dorky-Robot/katulong-tile-plano",
+  "config": [
+    {
+      "key": "talaUrl",
+      "label": "Tala Server URL (optional)",
+      "type": "text",
+      "placeholder": "http://localhost:3838"
+    },
+    {
+      "key": "talaToken",
+      "label": "Tala API Token (optional)",
+      "type": "secret",
+      "placeholder": "tala_xxx"
+    }
+  ]
+}
