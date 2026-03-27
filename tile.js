@@ -14,54 +14,68 @@
 
 const PLANO_DIR = "~/.katulong/plano/notes";
 
-function createLocalAdapter(sdk) {
-  const exec = (cmd) => sdk.terminal.exec(cmd);
+/**
+ * localStorage adapter — works everywhere, no dependencies.
+ * Notes stored as JSON in localStorage under "plano_notes" key.
+ */
+function createLocalStorageAdapter() {
+  const STORAGE_KEY = "plano_notes";
+
+  function loadAll() {
+    try {
+      return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+    } catch { return {}; }
+  }
+
+  function saveAll(notes) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(notes));
+  }
 
   return {
-    async init() {
-      await exec(`mkdir -p ${PLANO_DIR}`);
-    },
+    async init() { /* nothing to do */ },
 
     async list() {
-      try {
-        const out = await exec(`ls -1 ${PLANO_DIR}/*.md 2>/dev/null || true`);
-        const raw = (out || "").trim();
-        if (!raw) return [];
-        return raw.split("\n").map((f) => {
-          const base = f.split("/").pop().replace(/\.md$/, "");
-          return { slug: base, title: decodeSlug(base) };
-        });
-      } catch {
-        return [];
-      }
+      const notes = loadAll();
+      return Object.entries(notes)
+        .map(([slug, data]) => ({ slug, title: data.title || slug }))
+        .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
     },
 
     async read(slug) {
-      try {
-        const out = await exec(`cat '${PLANO_DIR}/${slug}.md' 2>/dev/null || true`);
-        return out || "";
-      } catch {
-        return "";
-      }
+      const notes = loadAll();
+      return notes[slug]?.content || "";
     },
 
     async write(slug, content) {
-      // Use heredoc to safely write content with special chars
-      const escaped = content.replace(/'/g, "'\\''");
-      await exec(`cat > '${PLANO_DIR}/${slug}.md' << 'PLANO_EOF'\n${content}\nPLANO_EOF`);
+      const notes = loadAll();
+      if (!notes[slug]) notes[slug] = { title: slug, content: "", createdAt: Date.now() };
+      notes[slug].content = content;
+      notes[slug].updatedAt = Date.now();
+      // Don't overwrite title if already set
+      saveAll(notes);
+    },
+
+    async create(title) {
+      const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "untitled";
+      const notes = loadAll();
+      let finalSlug = slug;
+      if (notes[finalSlug]) finalSlug = `${slug}-${Date.now().toString(36)}`;
+      notes[finalSlug] = { title, content: "", createdAt: Date.now(), updatedAt: Date.now() };
+      saveAll(notes);
+      return { slug: finalSlug, title };
     },
 
     async remove(slug) {
-      await exec(`rm -f '${PLANO_DIR}/${slug}.md'`);
+      const notes = loadAll();
+      delete notes[slug];
+      saveAll(notes);
     },
   };
 }
 
 function createTalaAdapter(talaUrl, talaToken) {
-  const headers = {
-    Authorization: `Bearer ${talaToken}`,
-    "Content-Type": "application/json",
-  };
+  const headers = { "Content-Type": "application/json" };
+  if (talaToken) headers.Authorization = `Bearer ${talaToken}`;
 
   async function api(path, opts = {}) {
     const url = talaUrl.replace(/\/$/, "") + path;
@@ -79,16 +93,17 @@ function createTalaAdapter(talaUrl, talaToken) {
     async list() {
       const res = await api("/api/notes");
       const data = await res.json();
-      return (data.notes || data || []).map((n) => ({
-        slug: n.slug || n.name,
-        title: n.title || n.name || n.slug,
+      return (data.notes || []).map((n) => ({
+        slug: n.id || n.slug || n.name,
+        title: n.title || n.name || "Untitled",
       }));
     },
 
     async read(slug) {
       const res = await api(`/api/notes/${encodeURIComponent(slug)}`);
       const data = await res.json();
-      return data.content || data.body || "";
+      // Tala returns { note: { content, ... } }
+      return data.note?.content || data.content || "";
     },
 
     async write(slug, content) {
@@ -98,12 +113,21 @@ function createTalaAdapter(talaUrl, talaToken) {
           body: JSON.stringify({ content }),
         });
       } catch {
-        // If PUT fails (note doesn't exist), try POST
+        // If PUT fails (note doesn't exist), try creating
         await api("/api/notes", {
           method: "POST",
-          body: JSON.stringify({ name: slug, content }),
+          body: JSON.stringify({ title: slug }),
         });
       }
+    },
+
+    async create(title) {
+      const res = await api("/api/notes", {
+        method: "POST",
+        body: JSON.stringify({ title }),
+      });
+      const data = await res.json();
+      return { slug: data.note?.id, title: data.note?.title || title };
     },
 
     async remove(slug) {
@@ -719,10 +743,14 @@ export default function setup(sdk, options = {}) {
     function initAdapter() {
       const talaUrl = getConfig("talaUrl");
       const talaToken = getConfig("talaToken");
-      if (talaUrl && talaToken) {
-        return createTalaAdapter(talaUrl, talaToken);
+
+      // If Tala is configured, use it (optional upgrade)
+      if (talaUrl) {
+        return createTalaAdapter(talaUrl, talaToken || null);
       }
-      return createLocalAdapter(sdk);
+
+      // Default: localStorage — works everywhere, no dependencies
+      return createLocalStorageAdapter();
     }
 
     function buildUI(el) {
@@ -887,11 +915,18 @@ export default function setup(sdk, options = {}) {
       const name = prompt("Note name:");
       if (!name) return;
 
-      const slug = slugify(name);
       const content = `# ${name}\n\n`;
 
       try {
-        await adapter.write(slug, content);
+        let slug;
+        if (adapter.create) {
+          const result = await adapter.create(name);
+          slug = result.slug;
+          await adapter.write(slug, content);
+        } else {
+          slug = slugify(name);
+          await adapter.write(slug, content);
+        }
         await loadNotes();
         await selectNote(slug);
       } catch (err) {
@@ -960,13 +995,28 @@ export default function setup(sdk, options = {}) {
       mount(el, tileCtx) {
         container = el;
         ctx = tileCtx;
-        adapter = initAdapter();
-        buildUI(el);
+
+        // Debug: show immediate feedback that mount was called
+        el.innerHTML = '<div style="padding:20px;color:#8f8;font-family:monospace;font-size:12px;">Plano mounting...</div>';
+
+        try {
+          adapter = initAdapter();
+        } catch (e) {
+          el.innerHTML = `<div style="padding:20px;color:#f88;font-family:monospace;">[plano] initAdapter error: ${e.message}</div>`;
+          return;
+        }
+
+        try {
+          buildUI(el);
+        } catch (e) {
+          el.innerHTML = `<div style="padding:20px;color:#f88;font-family:monospace;">[plano] buildUI error: ${e.message}</div>`;
+          return;
+        }
 
         // Initialize adapter and load notes
         adapter.init().then(() => loadNotes()).catch((err) => {
-          console.warn("[plano] Adapter init failed, using local fallback:", err);
-          adapter = createLocalAdapter(sdk);
+          console.warn("[plano] Adapter init failed, falling back to localStorage:", err);
+          adapter = createLocalStorageAdapter();
           adapter.init().then(() => loadNotes());
         });
       },
