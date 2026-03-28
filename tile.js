@@ -69,6 +69,16 @@ export default function setup(sdk, options) {
     }
   }
 
+  async function loadTalaEditor() {
+    if (customElements.get("tala-editor")) return true;
+    try {
+      await import("/extensions/plano/tala-editor.js");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function renderEditor() {
     if (!editorWrap) return;
     editorWrap.innerHTML = "";
@@ -83,20 +93,41 @@ export default function setup(sdk, options) {
       return;
     }
 
-    const editor = document.createElement("div");
-    editor.className = "pe-editor";
-    editor.contentEditable = "true";
-    editor.textContent = notes[activeId].content || "";
-    editor.addEventListener("input", () => {
-      if (!activeId) return;
-      const notes = getNotes();
-      notes[activeId].content = editor.textContent;
-      notes[activeId].updated = Date.now();
-      clearTimeout(saveTimer);
-      saveTimer = setTimeout(() => saveNotes(notes), 400);
-    });
-    editorWrap.appendChild(editor);
-    editorEl = editor;
+    const content = notes[activeId].content || "";
+
+    // Use <tala-editor> if available (rich text), otherwise basic contenteditable
+    if (customElements.get("tala-editor")) {
+      const te = document.createElement("tala-editor");
+      te.setAttribute("theme", "dark");
+      te.style.cssText = "height:100%;";
+      te.value = content;
+      te.addEventListener("change", () => {
+        if (!activeId) return;
+        const notes = getNotes();
+        notes[activeId].content = te.value;
+        notes[activeId].updated = Date.now();
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(() => saveNotes(notes), 400);
+      });
+      editorWrap.appendChild(te);
+      editorEl = te;
+    } else {
+      // Fallback: basic editor
+      const editor = document.createElement("div");
+      editor.className = "pe-editor";
+      editor.contentEditable = "true";
+      editor.textContent = content;
+      editor.addEventListener("input", () => {
+        if (!activeId) return;
+        const notes = getNotes();
+        notes[activeId].content = editor.textContent;
+        notes[activeId].updated = Date.now();
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(() => saveNotes(notes), 400);
+      });
+      editorWrap.appendChild(editor);
+      editorEl = editor;
+    }
   }
 
   function selectNote(id) {
@@ -185,8 +216,11 @@ export default function setup(sdk, options) {
       editorWrap.style.cssText = "flex:1;min-height:0;overflow-y:auto;";
       container.appendChild(editorWrap);
 
-      renderList();
-      renderEditor();
+      // Load <tala-editor> component (non-blocking), then render
+      loadTalaEditor().then(() => {
+        renderList();
+        renderEditor();
+      });
     },
 
     unmount() {
