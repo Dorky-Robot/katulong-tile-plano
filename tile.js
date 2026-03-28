@@ -718,8 +718,14 @@ function createEditor(container) {
 // Main tile setup
 // ============================================================
 
+function _log(msg) {
+  try { fetch("/api/client-log", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({msg, ts: Date.now()}) }); } catch {}
+}
+
 export default function setup(sdk, options = {}) {
+  _log("plano:setup called");
   return function createPlanoTile(tileOptions = {}) {
+    _log("plano:createPlanoTile called");
     let container = null;
     let ctx = null;
     let adapter = null;
@@ -848,38 +854,36 @@ export default function setup(sdk, options = {}) {
     }
 
     function updateUI() {
-      if (!rootEl) return;
-
-      // Update notes list
-      notesListEl.innerHTML = "";
-      for (const note of notesList) {
-        const item = document.createElement("div");
-        item.className = "plano-note-item" + (activeNote?.slug === note.slug ? " active" : "");
-        item.textContent = note.title;
-        item.addEventListener("click", () => selectNote(note.slug));
-        notesListEl.appendChild(item);
+      // Update sidebar note list
+      if (notesListEl) {
+        notesListEl.innerHTML = "";
+        for (const note of notesList) {
+          const item = document.createElement("div");
+          item.className = "plano-note-item" + (activeNote?.slug === note.slug ? " active" : "");
+          item.textContent = note.title;
+          item.addEventListener("click", () => selectNote(note.slug));
+          notesListEl.appendChild(item);
+        }
       }
 
-      // Show/hide empty state
-      const emptyEl = rootEl.querySelector(".plano-empty");
-      const editorEl = rootEl.querySelector(".pe-editor");
-      const titleBar = rootEl.querySelector(".plano-title-bar");
-      const shelf = rootEl.querySelector(".plano-shelf");
+      // Update toolbar title
+      if (ctx?.chrome?.toolbar) {
+        ctx.chrome.toolbar.setTitle(activeNote ? activeNote.title : "Plano");
+      }
 
-      if (activeNote) {
-        if (emptyEl) emptyEl.style.display = "none";
-        if (editorEl) editorEl.style.display = "";
-        if (titleBar) titleBar.style.display = "";
-        if (shelf) shelf.style.display = "";
-        const titleInput = rootEl.querySelector(".plano-title-input");
-        if (titleInput && titleInput !== document.activeElement) {
-          titleInput.value = activeNote.title;
+      // Show editor or empty state in contentEl
+      _log("updateUI: editorWrap=" + !!editorWrap + " activeNote=" + !!activeNote + " editorInstance=" + !!editorInstance);
+      if (editorWrap) {
+        if (activeNote) {
+          _log("updateUI: creating editor");
+          editorWrap.innerHTML = "";
+          editorInstance = createEditor(editorWrap);
+          editorInstance.onChange(() => scheduleSave());
+          _log("updateUI: editor created, pe-editor exists=" + !!editorWrap.querySelector(".pe-editor"));
+        } else {
+          editorWrap.innerHTML = '<div class="plano-empty"><span style="font-size:24px;">📝</span><span>Create or select a note</span></div>';
+          editorInstance = null;
         }
-      } else {
-        if (emptyEl) emptyEl.style.display = "";
-        if (editorEl) editorEl.style.display = "none";
-        if (titleBar) titleBar.style.display = "none";
-        if (shelf) shelf.style.display = "none";
       }
     }
 
@@ -895,15 +899,16 @@ export default function setup(sdk, options = {}) {
     }
 
     async function selectNote(slug) {
-      // Save current note first
       await saveCurrentNote();
 
       try {
         const content = await adapter.read(slug);
         activeNote = notesList.find((n) => n.slug === slug) || { slug, title: decodeSlug(slug) };
-        editorInstance.loadMarkdown(content);
-        editorInstance.clearDirty();
-        updateUI();
+        updateUI(); // This creates the editor if needed
+        if (editorInstance) {
+          editorInstance.loadMarkdown(content);
+          editorInstance.clearDirty();
+        }
       } catch (err) {
         console.error("[plano] Failed to load note:", err);
       }
@@ -993,39 +998,128 @@ export default function setup(sdk, options = {}) {
       type: "plano",
 
       mount(el, tileCtx) {
+        _log("plano:mount called");
         container = el;
         ctx = tileCtx;
-
-        // Debug: show immediate feedback that mount was called
-        el.innerHTML = '<div style="padding:20px;color:#8f8;font-family:monospace;font-size:12px;">Plano mounting...</div>';
 
         try {
           adapter = initAdapter();
         } catch (e) {
-          el.innerHTML = `<div style="padding:20px;color:#f88;font-family:monospace;">[plano] initAdapter error: ${e.message}</div>`;
+          el.innerHTML = `<div style="padding:20px;color:#f88;font-family:monospace;">[plano] ${e.message}</div>`;
           return;
         }
 
-        try {
-          buildUI(el);
-        } catch (e) {
-          el.innerHTML = `<div style="padding:20px;color:#f88;font-family:monospace;">[plano] buildUI error: ${e.message}</div>`;
-          return;
+        const hasChrome = !!(ctx?.chrome?.toolbar);
+
+        // ── Chrome: Toolbar ──────────────────────────────
+        if (hasChrome) {
+          ctx.chrome.toolbar.setTitle("Plano");
+          ctx.chrome.toolbar.addButton({
+            icon: "plus",
+            label: "New Note",
+            position: "left",
+            onClick: handleNewNote,
+          });
+          ctx.chrome.toolbar.addButton({
+            icon: "trash",
+            label: "Delete Note",
+            position: "right",
+            onClick: handleDeleteNote,
+          });
         }
 
-        // Initialize adapter and load notes
+        // ── Chrome: Sidebar (note list) ──────────────────
+        notesListEl = document.createElement("div");
+        notesListEl.className = "plano-notes-list";
+        notesListEl.style.cssText = "padding:8px;overflow-y:auto;";
+
+        if (ctx?.chrome?.sidebar) {
+          ctx.chrome.sidebar.mount(notesListEl);
+          ctx.chrome.sidebar.setWidth("160px");
+        }
+
+        // ── Fallback: inline controls when no chrome ─────
+        if (!hasChrome) {
+          const header = document.createElement("div");
+          header.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.1);";
+          const title = document.createElement("span");
+          title.textContent = "Plano";
+          title.style.cssText = "font-weight:600;color:#fff;font-family:-apple-system,sans-serif;font-size:13px;";
+          const newBtn = document.createElement("button");
+          newBtn.textContent = "+ New Note";
+          newBtn.style.cssText = "background:none;border:1px solid rgba(255,255,255,0.2);color:rgba(255,255,255,0.7);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px;font-family:-apple-system,sans-serif;";
+          newBtn.addEventListener("click", handleNewNote);
+          header.appendChild(title);
+          header.appendChild(newBtn);
+          el.appendChild(header);
+
+          // Inline sidebar (note list above editor)
+          notesListEl.style.cssText += "max-height:120px;border-bottom:1px solid rgba(255,255,255,0.1);";
+          el.appendChild(notesListEl);
+        }
+
+        // ── Chrome: Shelf (chat input) ───────────────────
+        if (ctx?.chrome?.shelf) {
+          const shelfEl = document.createElement("div");
+          shelfEl.style.cssText = "display:flex;gap:8px;padding:6px 8px;align-items:center;";
+          const input = document.createElement("input");
+          input.type = "text";
+          input.placeholder = "Chat with agent...";
+          input.style.cssText = "flex:1;padding:5px 8px;border:1px solid rgba(255,255,255,0.15);border-radius:4px;background:rgba(255,255,255,0.05);color:#e0e0e0;font-size:12px;outline:none;font-family:inherit;";
+          input.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" && input.value.trim()) {
+              // Send to back-face terminal via ctx
+              if (ctx.sendWs) ctx.sendWs({ type: "terminal:input", data: input.value + "\n" });
+              input.value = "";
+            }
+          });
+          const flipBtn = document.createElement("button");
+          flipBtn.style.cssText = "background:none;border:none;color:rgba(255,255,255,0.4);cursor:pointer;font-size:14px;padding:2px 4px;";
+          flipBtn.innerHTML = '<i class="ph ph-terminal-window"></i>';
+          flipBtn.title = "Flip to terminal";
+          flipBtn.addEventListener("click", () => { if (ctx.flip) ctx.flip(); });
+          shelfEl.appendChild(input);
+          shelfEl.appendChild(flipBtn);
+          ctx.chrome.shelf.mount(shelfEl);
+        }
+
+        // ── Content: Editor ──────────────────────────────
+        // Inject minimal styles
+        if (!document.getElementById("plano-styles")) {
+          const style = document.createElement("style");
+          style.id = "plano-styles";
+          style.textContent = `
+            .plano-note-item { padding:5px 8px; margin:1px 0; border-radius:3px; cursor:pointer; font-size:11px; color:rgba(255,255,255,0.6); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:-apple-system,sans-serif; }
+            .plano-note-item:hover { background:rgba(255,255,255,0.08); }
+            .plano-note-item.active { color:#fff; background:rgba(255,255,255,0.12); }
+            .plano-empty { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; color:rgba(255,255,255,0.3); font-family:-apple-system,sans-serif; font-size:13px; gap:8px; }
+          `;
+          document.head.appendChild(style);
+        }
+
+        // Editor area fills contentEl
+        editorWrap = document.createElement("div");
+        editorWrap.style.cssText = "height:100%;overflow-y:auto;";
+
+        // Empty state
+        editorWrap.innerHTML = '<div class="plano-empty"><span style="font-size:24px;">📝</span><span>Create or select a note</span></div>';
+
+        el.appendChild(editorWrap);
+        rootEl = el;
+
+        // Load notes
         adapter.init().then(() => loadNotes()).catch((err) => {
-          console.warn("[plano] Adapter init failed, falling back to localStorage:", err);
+          _log("plano:adapter init failed: " + err.message);
           adapter = createLocalStorageAdapter();
           adapter.init().then(() => loadNotes());
         });
       },
 
       unmount() {
-        // Save before unmounting
         saveCurrentNote();
         if (saveTimer) clearTimeout(saveTimer);
-        if (rootEl) rootEl.remove();
+        if (ctx?.chrome?.sidebar) ctx.chrome.sidebar.unmount();
+        if (ctx?.chrome?.shelf) ctx.chrome.shelf.unmount();
         rootEl = null;
         container = null;
         ctx = null;
