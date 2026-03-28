@@ -872,14 +872,30 @@ export default function setup(sdk, options = {}) {
       }
 
       // Show editor or empty state in contentEl
-      _log("updateUI: editorWrap=" + !!editorWrap + " activeNote=" + !!activeNote + " editorInstance=" + !!editorInstance);
       if (editorWrap) {
         if (activeNote) {
-          _log("updateUI: creating editor");
           editorWrap.innerHTML = "";
-          editorInstance = createEditor(editorWrap);
-          editorInstance.onChange(() => scheduleSave());
-          _log("updateUI: editor created, pe-editor exists=" + !!editorWrap.querySelector(".pe-editor"));
+
+          // Use <tala-editor> web component if available, fallback to built-in
+          if (customElements.get("tala-editor")) {
+            const te = document.createElement("tala-editor");
+            te.setAttribute("theme", "dark");
+            te.style.cssText = "height:100%;";
+            te.addEventListener("change", () => scheduleSave());
+            te.addEventListener("save", () => scheduleSave());
+            editorWrap.appendChild(te);
+            editorInstance = {
+              loadMarkdown(md) { te.value = md; },
+              clearDirty() {},
+              getMarkdown() { return te.value; },
+              onChange(fn) { te.addEventListener("change", fn); },
+              focus() { te.focus(); },
+            };
+          } else {
+            // Fallback to built-in editor
+            editorInstance = createEditor(editorWrap);
+            editorInstance.onChange(() => scheduleSave());
+          }
         } else {
           editorWrap.innerHTML = '<div class="plano-empty"><span style="font-size:24px;">📝</span><span>Create or select a note</span></div>';
           editorInstance = null;
@@ -997,10 +1013,20 @@ export default function setup(sdk, options = {}) {
     return {
       type: "plano",
 
-      mount(el, tileCtx) {
+      async mount(el, tileCtx) {
         _log("plano:mount called");
         container = el;
         ctx = tileCtx;
+
+        // Load <tala-editor> web component if not already registered
+        if (!customElements.get("tala-editor")) {
+          try {
+            await import("/extensions/plano/tala-editor.js");
+            _log("plano: tala-editor loaded");
+          } catch (err) {
+            _log("plano: tala-editor load failed: " + err.message);
+          }
+        }
 
         try {
           adapter = initAdapter();
