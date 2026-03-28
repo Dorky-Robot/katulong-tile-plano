@@ -1,21 +1,13 @@
 /**
- * Plano — context sheets for katulong.
+ * Plano Tile — context sheets for katulong.
  *
- * Follows the Tile SDK contract exactly:
- *   export default function setup(sdk, options) → TilePrototype
+ * Uses the Tile SDK properly:
+ *   setup(sdk, options) receives the real SDK with storage, sessions, etc.
+ *   Returns a TilePrototype with mount(el, ctx).
+ *
+ * Storage: sdk.storage (namespaced per tile type, persists in localStorage)
+ * Chrome: ctx.chrome.toolbar/sidebar/shelf
  */
-
-const STORAGE_KEY = "plano_notes";
-
-function loadNotes() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"); } catch { return {}; }
-}
-function saveNotes(notes) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(notes));
-}
-function genId() {
-  return "n_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-}
 
 // Inject styles once
 let _styled = false;
@@ -33,17 +25,40 @@ function ensureStyles() {
   document.head.appendChild(s);
 }
 
+function genId() {
+  return "n_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
 export default function setup(sdk, options) {
   let el = null;
   let ctx = null;
-  let notes = {};
   let activeId = null;
   let editorEl = null;
+  let editorWrap = null;
   let listEl = null;
   let saveTimer = null;
 
+  // Use sdk.storage for notes persistence (namespaced, survives reload)
+  // Falls back to raw localStorage when sdk is not available (test harness)
+  const FALLBACK_KEY = "plano_notes";
+
+  function loadNotes() {
+    if (sdk?.storage) return sdk.storage.get("notes") || {};
+    try { return JSON.parse(localStorage.getItem(FALLBACK_KEY) || "{}"); } catch { return {}; }
+  }
+
+  function saveNotes(notes) {
+    if (sdk?.storage) { sdk.storage.set("notes", notes); return; }
+    try { localStorage.setItem(FALLBACK_KEY, JSON.stringify(notes)); } catch {}
+  }
+
+  function getNotes() {
+    return loadNotes();
+  }
+
   function renderList() {
     if (!listEl) return;
+    const notes = getNotes();
     listEl.innerHTML = "";
     for (const [id, note] of Object.entries(notes)) {
       const li = document.createElement("div");
@@ -55,14 +70,15 @@ export default function setup(sdk, options) {
   }
 
   function renderEditor() {
-    if (!el) return;
-    el.innerHTML = "";
+    if (!editorWrap) return;
+    editorWrap.innerHTML = "";
+    const notes = getNotes();
 
     if (!activeId || !notes[activeId]) {
       const empty = document.createElement("div");
       empty.className = "plano-empty";
       empty.textContent = "Create or select a note";
-      el.appendChild(empty);
+      editorWrap.appendChild(empty);
       editorEl = null;
       return;
     }
@@ -73,16 +89,19 @@ export default function setup(sdk, options) {
     editor.textContent = notes[activeId].content || "";
     editor.addEventListener("input", () => {
       if (!activeId) return;
+      const notes = getNotes();
       notes[activeId].content = editor.textContent;
+      notes[activeId].updated = Date.now();
       clearTimeout(saveTimer);
       saveTimer = setTimeout(() => saveNotes(notes), 400);
     });
-    el.appendChild(editor);
+    editorWrap.appendChild(editor);
     editorEl = editor;
   }
 
   function selectNote(id) {
     activeId = id;
+    const notes = getNotes();
     if (ctx?.chrome?.toolbar) {
       ctx.chrome.toolbar.setTitle(notes[id]?.title || "Plano");
     }
@@ -94,7 +113,8 @@ export default function setup(sdk, options) {
     const title = prompt("Note title:");
     if (!title) return;
     const id = genId();
-    notes[id] = { title, content: "", created: Date.now() };
+    const notes = getNotes();
+    notes[id] = { title, content: "", created: Date.now(), updated: Date.now() };
     saveNotes(notes);
     selectNote(id);
   }
@@ -102,6 +122,7 @@ export default function setup(sdk, options) {
   function deleteNote() {
     if (!activeId) return;
     if (!confirm("Delete this note?")) return;
+    const notes = getNotes();
     delete notes[activeId];
     saveNotes(notes);
     activeId = null;
@@ -117,7 +138,6 @@ export default function setup(sdk, options) {
       ensureStyles();
       el = container;
       ctx = tileCtx;
-      notes = loadNotes();
 
       // Chrome: toolbar
       if (ctx?.chrome?.toolbar) {
@@ -131,13 +151,39 @@ export default function setup(sdk, options) {
       }
 
       // Chrome: sidebar
+      listEl = document.createElement("div");
+      listEl.className = "plano-notes-list";
+      listEl.style.cssText = "padding:4px 0;overflow-y:auto;";
+
       if (ctx?.chrome?.sidebar) {
-        listEl = document.createElement("div");
-        listEl.className = "plano-notes-list";
-        listEl.style.cssText = "padding:4px 0;overflow-y:auto;height:100%;";
+        listEl.style.height = "100%";
         ctx.chrome.sidebar.mount(listEl);
         ctx.chrome.sidebar.setWidth("160px");
       }
+
+      // Fallback: inline controls when no chrome zones
+      if (!ctx?.chrome?.toolbar) {
+        const header = document.createElement("div");
+        header.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.1);flex-shrink:0;";
+        const title = document.createElement("span");
+        title.textContent = "Plano";
+        title.style.cssText = "font-weight:600;color:#fff;font-size:13px;";
+        const btn = document.createElement("button");
+        btn.textContent = "+ New Note";
+        btn.style.cssText = "background:none;border:1px solid rgba(255,255,255,0.2);color:rgba(255,255,255,0.7);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px;";
+        btn.addEventListener("click", createNote);
+        header.appendChild(title);
+        header.appendChild(btn);
+        container.style.cssText = (container.style.cssText || "") + "display:flex;flex-direction:column;";
+        container.appendChild(header);
+        listEl.style.cssText += "max-height:100px;border-bottom:1px solid rgba(255,255,255,0.1);flex-shrink:0;overflow-y:auto;";
+        container.appendChild(listEl);
+      }
+
+      // Editor wrapper (goes last in container, fills remaining space)
+      editorWrap = document.createElement("div");
+      editorWrap.style.cssText = "flex:1;min-height:0;overflow-y:auto;";
+      container.appendChild(editorWrap);
 
       renderList();
       renderEditor();
