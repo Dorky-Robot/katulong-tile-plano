@@ -887,7 +887,8 @@ export default function setup(sdk, options = {}) {
             editorInstance = {
               loadMarkdown(md) { te.value = md; },
               clearDirty() {},
-              getMarkdown() { return te.value; },
+              isDirty() { return false; },
+              toMarkdown() { return te.value; },
               onChange(fn) { te.addEventListener("change", fn); },
               focus() { te.focus(); },
             };
@@ -897,7 +898,7 @@ export default function setup(sdk, options = {}) {
             editorInstance.onChange(() => scheduleSave());
           }
         } else {
-          editorWrap.innerHTML = '<div class="plano-empty"><span style="font-size:24px;">📝</span><span>Create or select a note</span></div>';
+          editorWrap.innerHTML = '<div class="plano-empty"><span style="font-size:24px;">&#128221;</span><span>Create or select a note</span></div>';
           editorInstance = null;
         }
       }
@@ -1066,8 +1067,10 @@ export default function setup(sdk, options = {}) {
 
         // ── Fallback: inline controls when no chrome ─────
         if (!hasChrome) {
+          // Make container a flex column so editor fills remaining space
+          el.style.cssText = (el.style.cssText || "") + "display:flex;flex-direction:column;";
           const header = document.createElement("div");
-          header.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.1);";
+          header.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.1);flex-shrink:0;";
           const title = document.createElement("span");
           title.textContent = "Plano";
           title.style.cssText = "font-weight:600;color:#fff;font-family:-apple-system,sans-serif;font-size:13px;";
@@ -1080,7 +1083,7 @@ export default function setup(sdk, options = {}) {
           el.appendChild(header);
 
           // Inline sidebar (note list above editor)
-          notesListEl.style.cssText += "max-height:120px;border-bottom:1px solid rgba(255,255,255,0.1);";
+          notesListEl.style.cssText += "max-height:120px;border-bottom:1px solid rgba(255,255,255,0.1);flex-shrink:0;";
           el.appendChild(notesListEl);
         }
 
@@ -1118,14 +1121,14 @@ export default function setup(sdk, options = {}) {
             .plano-note-item { padding:5px 8px; margin:1px 0; border-radius:3px; cursor:pointer; font-size:11px; color:rgba(255,255,255,0.6); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:-apple-system,sans-serif; }
             .plano-note-item:hover { background:rgba(255,255,255,0.08); }
             .plano-note-item.active { color:#fff; background:rgba(255,255,255,0.12); }
-            .plano-empty { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; color:rgba(255,255,255,0.3); font-family:-apple-system,sans-serif; font-size:13px; gap:8px; }
+            .plano-empty { display:flex; flex-direction:column; align-items:center; justify-content:center; flex:1; min-height:0; color:rgba(255,255,255,0.3); font-family:-apple-system,sans-serif; font-size:13px; gap:8px; }
           `;
           document.head.appendChild(style);
         }
 
-        // Editor area fills contentEl
+        // Editor area fills contentEl (use flex:1 for chrome layout)
         editorWrap = document.createElement("div");
-        editorWrap.style.cssText = "height:100%;overflow-y:auto;";
+        editorWrap.style.cssText = "flex:1;min-height:0;overflow-y:auto;";
 
         // Empty state
         editorWrap.innerHTML = '<div class="plano-empty"><span style="font-size:24px;">📝</span><span>Create or select a note</span></div>';
